@@ -1,10 +1,12 @@
 [package]
 name = "generic-static-cache"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Static storage of generic types"
+description = "Generic static storage in generic functions"
+keywords = ["nightly"]
 categories = ["caching","data-structures","memory-management"]
+repository = "https://github.com/SpecificProtagonist/generic-static-cache/"
 
 [dependencies]
-bytemuck = { version = "1.14", features = ["zeroable_atomics", "zeroable_maybe_uninit"] }
+bytemuck = { version = ">=1.13", features = ["zeroable_atomics", "zeroable_maybe_uninit"] }

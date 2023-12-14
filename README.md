@@ -1,3 +1,5 @@
+⚠ Nightly ⚠
+
 Quoting the [Rust Reference](https://doc.rust-lang.org/reference/items/static-items.html):
 
 "A static item defined in a generic scope (for example in a blanket or default implementation)
@@ -10,27 +12,38 @@ If lookup performance is important, you can skip hashing the `TypeId` for minor 
 This crate aims to further fully remove the lookup by allocating the storage using inline
 assembly.
 
-Currently only *amd64* is supported! Unless you only target amd64, you need to
-fall back to a hashmap on other platforms. Additionally, different compilation units may
-access different instances of the data.
+Currently only **x86-64** is supported. Unless you only target x86-64, you need to
+fall back to a hashmap on other platforms. Additionally, different compilation units
+may access different instances of the data!
 
-This crate requires the following unstable features: `asm_const`, `const_type_id`
+This crate requires the following unstable features: `asm_const`, `const_type_id`, `const_collections_with_hasher`
 
 # Examples
+Static variables in a generic context:
 ```rust
+#![feature(const_collections_with_hasher)]
 fn get_and_inc<T>() -> i32 {
-    generic_static!(
-        static blub: &AtomicI32 = &AtomicI32::new(1);
-    );
+    generic_static!{
+        static blub: &AtomicI32 = &AtomicI32::new(0);
+    }
     let value = blub.load(Ordering::Relaxed);
     blub.fetch_add(1, Ordering::Relaxed);
     value
 }
+assert_eq!(get_and_inc::<bool>(), 0);
 assert_eq!(get_and_inc::<bool>(), 1);
+assert_eq!(get_and_inc::<String>(), 0);
 assert_eq!(get_and_inc::<bool>(), 2);
-assert_eq!(get_and_inc::<String>(), 1);
-assert_eq!(get_and_inc::<bool>(), 3);
 ```
+To support all platforms (keeping the performance benefits on supported platforms), change the above to
+```rust
+...
+fallback_generic_static!{
+    T => static blub: &AtomicI32 = &AtomicI32::new(0);
+}
+...
+```
+Associating data with a type:
 ```rust
 #[derive(Copy, Clone, Eq, PartialEq)]
 struct Metadata(&'static str);
