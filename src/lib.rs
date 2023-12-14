@@ -12,13 +12,31 @@
 //! If lookup performance is important, you can skip hashing the `TypeId` for minor gains as it [already contains](https://github.com/rust-lang/rust/blob/eeff92ad32c2627876112ccfe812e19d38494087/library/core/src/any.rs#L645) a good-quality hash. This is implemented in `TypeIdMap`.
 //!
 //! This crate aims to further fully remove the lookup by allocating the storage using inline
-//! assembly. Currently only amd64 is supported. Unless you only target amd64, you need to
+//! assembly.
+//!
+//! Currently only *amd64* is supported! Unless you only target amd64, you need to
 //! fall back to a hashmap on other platforms. Additionally, different compilation units
 //! may access different instances of the data.
 //!
 //! This crate requires the following unstable features: `asm_const`, `const_type_id`
 //!
-//! # Example
+//! # Examples
+//! ```
+//! # use std::sync::atomic::{AtomicI32, Ordering};
+//! # use generic_static_cache::generic_static;
+//! fn get_and_inc<T>() -> i32 {
+//!     generic_static!(
+//!         static blub: &AtomicI32 = &AtomicI32::new(1);
+//!     );
+//!     let value = blub.load(Ordering::Relaxed);
+//!     blub.fetch_add(1, Ordering::Relaxed);
+//!     value
+//! }
+//! assert_eq!(get_and_inc::<bool>(), 1);
+//! assert_eq!(get_and_inc::<bool>(), 2);
+//! assert_eq!(get_and_inc::<String>(), 1);
+//! assert_eq!(get_and_inc::<bool>(), 3);
+//! ```
 //! ```
 //! # #[derive(Debug)]
 //! ##[derive(Copy, Clone, Eq, PartialEq)]
@@ -27,11 +45,12 @@
 //! struct Cat;
 //! struct Bomb;
 //!
-//! generic_static_cache::init::<Cat, _>(Metadata("nya!")).unwrap();
-//! generic_static_cache::init::<Bomb, _>(Metadata("boom!")).unwrap();
+//! use generic_static_cache::{get, init};
+//! init::<Cat, _>(Metadata("nya!")).unwrap();
+//! init::<Bomb, _>(Metadata("boom!")).unwrap();
 //!
-//! assert_eq!(generic_static_cache::get::<Cat, _>(), Some(Metadata("nya!")));
-//! assert_eq!(generic_static_cache::get::<Bomb, _>(), Some(Metadata("boom!")));
+//! assert_eq!(get::<Cat, _>(), Some(Metadata("nya!")));
+//! assert_eq!(get::<Bomb, _>(), Some(Metadata("boom!")));
 //! ```
 
 use std::any::TypeId;
@@ -91,6 +110,56 @@ pub fn get_or_init<Type: 'static, Data: Copy + 'static>(cons: impl Fn() -> Data)
     } else {
         unsafe { *data }
     }
+}
+
+/// Declare a static variable that is not shared across different monomorphizations
+/// of the containing functions. Its type must be a shared reference to a type
+/// that implements Sync.
+/// # Example
+/// ```
+/// # use std::sync::atomic::Ordering;
+/// # use std::sync::Mutex;
+/// # use generic_static_cache::generic_static;
+/// generic_static!(
+///     static name: &Mutex<String> = &Mutex::new("Ferris".to_string());
+/// );
+/// ```
+#[macro_export]
+macro_rules! generic_static {
+    (static $ident:ident : &$type:ty = &$init:expr;) => {
+        let $ident: &'static $type = {
+            fn assert_sync<T: Sync>() {}
+            assert_sync::<$type>();
+            trait Make<T>: Sized + 'static {
+                fn make(self) -> &'static std::sync::atomic::AtomicPtr<T> {
+                    $crate::direct::<Self, std::sync::atomic::AtomicPtr<T>>()
+                }
+            }
+            impl<T: 'static, S> Make<S> for T {}
+            let ptr = Make::<$type>::make(|| ());
+            let data = ptr.load(std::sync::atomic::Ordering::SeqCst);
+            if data.is_null() {
+                let value: $type = (|| $init)();
+                let boxed = Box::into_raw(Box::new(value));
+                if ptr
+                    .compare_exchange(
+                        std::ptr::null_mut(),
+                        boxed,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_err()
+                {
+                    unsafe {
+                        drop(Box::from_raw(boxed));
+                    }
+                }
+                unsafe { &*boxed }
+            } else {
+                unsafe { &*data }
+            }
+        };
+    };
 }
 
 /// Access data associated with Type without indirection. Requires interior mutability to be useful.
@@ -159,3 +228,7 @@ fn test_heapless() {
     assert_eq!(b.load(Ordering::Relaxed), 0);
     assert_eq!(*direct::<Option<()>, i64>(), 0);
 }
+
+#[cfg(test)]
+#[test]
+fn test_macro() {}

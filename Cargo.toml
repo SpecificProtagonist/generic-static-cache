@@ -3,7 +3,8 @@ name = "generic-static-cache"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Static storage of arbitrary types"
+description = "Static storage of generic types"
+categories = ["caching","data-structures","memory-management"]
 
 [dependencies]
 bytemuck = { version = "1.14", features = ["zeroable_atomics", "zeroable_maybe_uninit"] }
