@@ -12,7 +12,7 @@ If lookup performance is important, you can skip hashing the `TypeId` for minor 
 This crate aims to further fully remove the lookup by allocating the storage using inline
 assembly.
 
-Currently only **x86-64** is supported. Unless you only target x86-64, you need to
+Currently only *x86-64* and **aarch64** are supported! Unless you only target this, you need to
 fall back to a hashmap on other platforms. Additionally, different compilation units
 may access different instances of the data!
 

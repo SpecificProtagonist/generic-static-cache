@@ -17,7 +17,7 @@
 //! This crate aims to further fully remove the lookup by allocating the storage using inline
 //! assembly.
 //!
-//! Currently only *x86-64* is supported! Unless you only target x86-64, you need to
+//! Currently only *x86-64* and **aarch64** are supported! Unless you only target this, you need to
 //! fall back to a hashmap on other platforms. Additionally, different compilation units
 //! may access different instances of the data.
 //!
@@ -93,7 +93,7 @@ unsafe impl<T> Zeroable for Heap<T> {}
 /// Each `Type` can hold data for multiple different instantiations of `Data`.
 ///
 /// If called multiple times, only the first call will succeed.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn init<Type: 'static, Data: Copy + 'static>(data: Data) -> Result<(), AlreadyInitialized> {
     let boxed = Box::into_raw(Box::new(data));
     match direct::<Type, Heap<Data>>().0.compare_exchange(
@@ -114,7 +114,7 @@ pub fn init<Type: 'static, Data: Copy + 'static>(data: Data) -> Result<(), Alrea
 
 /// Access the `Data`-storage of type `Type`.
 /// Each `Type` can hold data for multiple different instantiations of `Data`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn get<Type: 'static, Data: Copy + 'static>() -> Option<Data> {
     let data = direct::<Type, Heap<Data>>().0.load(Ordering::SeqCst);
     if data.is_null() {
@@ -126,7 +126,7 @@ pub fn get<Type: 'static, Data: Copy + 'static>() -> Option<Data> {
 
 /// Initialize & access the `Data`-storage of type `Type`.
 /// Each `Type` can hold data for multiple different instantiations of `Data`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn get_or_init<Type: 'static, Data: Copy + 'static>(cons: impl Fn() -> Data) -> Data {
     let data = direct::<Type, Heap<Data>>().0.load(Ordering::SeqCst);
     if data.is_null() {
@@ -152,7 +152,7 @@ pub fn get_or_init<Type: 'static, Data: Copy + 'static>(cons: impl Fn() -> Data)
 ///     static name: &Mutex<String> = &Mutex::new("Ferris".to_string());
 /// }
 /// ```
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[macro_export]
 macro_rules! generic_static {
     {static $ident:ident : &$type:ty = &$init:expr;} => {
@@ -210,8 +210,7 @@ macro_rules! generic_static {
 macro_rules! fallback_generic_static {
     {$key:ty => static $ident:ident : &$type:ty = &$init:expr;} => {
         let $ident: &'static $type = {
-            #[cfg(target_arch = "x86_64")]
-            {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
                 fn inner<T: 'static>(init: impl FnOnce() -> $type) -> &'static $type {
                     $crate::generic_static! {
                         static inner: &$type = &init();
@@ -220,8 +219,7 @@ macro_rules! fallback_generic_static {
                 }
                 inner::<T>(||$init)
             }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))] {
                 static MAP: std::sync::Mutex<$crate::TypeIdMap<&'static $type>> =
                     std::sync::Mutex::new($crate::TypeIdMap::<&'static $type>::with_hasher(
                         $crate::NoOpTypeIdBuildHasher,
@@ -237,7 +235,7 @@ macro_rules! fallback_generic_static {
 
 /// Access data associated with Type without indirection. Requires interior mutability to be useful.
 /// This data is independent of the data accessed via [`get`]/[`init`]/[`get_or_init`].
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn direct<Type: 'static, Data: Zeroable + 'static>() -> &'static Data {
     // Work around "can't use generic parameter from outer function"
     trait Id: 'static {
@@ -246,22 +244,39 @@ pub fn direct<Type: 'static, Data: Zeroable + 'static>() -> &'static Data {
     impl<S: 'static> Id for S {}
 
     unsafe {
-        let addr: usize;
+        // Create static storage
         asm!(
-            // Create static storage
             ".pushsection .data",
             ".balign {align}",
             "type_data_{id}:",
             ".skip {size}",
             ".popsection",
-            // Position-independent address
-            "lea {addr}, [rip+type_data_{id}]",
-            addr = out(reg) addr,
             id = const <(Type, Data) as Id>::ID,
             align = const align_of::<Data>(),
             size = const size_of::<Data>(),
-            options(pure, nomem)
+            options(nomem)
         );
+        // Tested both with position-independent code and with -C relocation-model=static
+        let addr: usize;
+        #[cfg(target_arch = "x86_64")]
+        {
+            asm!(
+                "lea {addr}, [rip+type_data_{id}]",
+                addr = out(reg) addr,
+                id = const <(Type, Data) as Id>::ID,
+                options(pure, nomem)
+            );
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            asm!(
+                "adrp {addr}, type_data_{id}",
+                "add {addr}, {addr}, :lo12:type_data_{id}",
+                addr = out(reg) addr,
+                id = const <(Type, Data) as Id>::ID,
+                options(pure, nomem)
+            );
+        }
         &*(addr as *const _)
     }
 }
@@ -313,7 +328,6 @@ fn test_heapless() {
     assert_eq!(b.load(Ordering::Relaxed), 0);
     assert_eq!(*direct::<Option<()>, i64>(), 0);
 
-    // Check no duplicate symbol errors
     std::hint::black_box(direct::<Option<bool>, AtomicI64>());
 }
 
