@@ -217,7 +217,7 @@ macro_rules! fallback_generic_static {
                     }
                     inner
                 }
-                inner::<T>(||$init)
+                inner::<$key>(||$init)
             }
             #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))] {
                 static MAP: std::sync::Mutex<$crate::TypeIdMap<&'static $type>> =
@@ -347,4 +347,17 @@ fn test_fallback_macro() {
     assert_eq!(get_and_inc::<bool>(), 2);
     assert_eq!(get_and_inc::<String>(), 1);
     assert_eq!(get_and_inc::<bool>(), 3);
+
+    fallback_generic_static!(
+        () => static foo_1: &AtomicI32 = &AtomicI32::new(0);
+    );
+    fallback_generic_static!(
+        () => static foo_2: &AtomicI32 = &AtomicI32::new(69);
+    );
+    assert_eq!(foo_1.load(Ordering::Relaxed), 0);
+    assert_eq!(foo_2.load(Ordering::Relaxed), 69);
+    foo_1.store(1, Ordering::Relaxed);
+    foo_2.store(2, Ordering::Relaxed);
+    assert_eq!(foo_1.load(Ordering::Relaxed), 1);
+    assert_eq!(foo_2.load(Ordering::Relaxed), 2);
 }
