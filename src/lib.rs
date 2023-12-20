@@ -1,5 +1,9 @@
 #![feature(asm_const)]
 #![feature(const_type_id)]
+#![cfg_attr(
+    not(any(target_arch = "x86_64", target_arch = "aarch64")),
+    feature(const_collections_with_hasher)
+)]
 #![allow(named_asm_labels)]
 // TODO: Properly test data for same type from different compilation units
 // TODO: More platforms
@@ -12,16 +16,20 @@
 //! out of the current scope into the module. There will not be one item per monomorphization."
 //!
 //! One way to work around this is to use a `HashMap<TypeId,Data>`. This is a simple & usually the best solution.
-//! If lookup performance is important, you can skip hashing the `TypeId` for minor gains as it [already contains](https://github.com/rust-lang/rust/blob/eeff92ad32c2627876112ccfe812e19d38494087/library/core/src/any.rs#L645) a good-quality hash. This is implemented in `TypeIdMap`.
+//! If lookup performance is important, you can skip hashing the `TypeId` for minor gains as it
+//! [already contains](https://github.com/rust-lang/rust/blob/eeff92ad32c2627876112ccfe812e19d38494087/library/core/src/any.rs#L645)
+//! a good-quality hash. This is implemented in `TypeIdMap`.
 //!
 //! This crate aims to further fully remove the lookup by allocating the storage using inline
 //! assembly.
 //!
-//! Currently only *x86-64* and **aarch64** are supported! Unless you only target this, you need to
-//! fall back to a hashmap on other platforms. Additionally, different compilation units
-//! may access different instances of the data.
+//! Supported targets are **x86-64** and **aarch64**. On other targets, the `generic_static` macro
+//! falls back to a hashmap and most other functionality is unavailable.
 //!
-//! This crate requires the following unstable features: `asm_const`, `const_type_id`, `const_collections_with_hasher`
+//! Additionally, different compilation units may access different instances of the data!
+//!
+//! This crate requires the following unstable features: `asm_const`, `const_type_id` and
+//! (on unsupported targets) `const_collections_with_hasher`.
 //!
 //! # Examples
 //! Static variables in a generic context:
@@ -31,7 +39,7 @@
 //! # use generic_static_cache::generic_static;
 //! fn get_and_inc<T>() -> i32 {
 //!     generic_static!{
-//!         static COUNTER = &AtomicI32::new(1);
+//!         static COUNTER: &AtomicI32 = &AtomicI32::new(1);
 //!     }
 //!     COUNTER.fetch_add(1, Ordering::Relaxed)
 //! }
@@ -39,19 +47,6 @@
 //! assert_eq!(get_and_inc::<bool>(), 2);
 //! assert_eq!(get_and_inc::<String>(), 1);
 //! assert_eq!(get_and_inc::<bool>(), 3);
-//! ```
-//! To support all platforms (keeping the performance benefits on supported platforms), change the above to
-//! ```
-//! # use std::sync::atomic::AtomicI32;
-//! # use generic_static_cache::fallback_generic_static; /*
-//! ...
-//! # */ struct T;
-//! fallback_generic_static!{
-//!     T => static COUNTER = &AtomicI32::new(1);
-//! }
-//! # /*
-//! ...
-//! # */
 //! ```
 //! Associating data with a type:
 //! ```
@@ -71,11 +66,9 @@
 //! ```
 
 use std::any::TypeId;
-use std::arch::asm;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
-use std::mem::{align_of, size_of};
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::AtomicPtr;
 
 use bytemuck::Zeroable;
 
@@ -91,8 +84,11 @@ unsafe impl<T> Zeroable for Heap<T> {}
 /// Each `Type` can hold data for multiple different instantiations of `Data`.
 ///
 /// If called multiple times, only the first call will succeed.
+///
+/// Only available on supported targets.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn init<Type: 'static, Data: Copy + 'static>(data: Data) -> Result<(), AlreadyInitialized> {
+    use std::sync::atomic::Ordering;
     let boxed = Box::into_raw(Box::new(data));
     match direct::<Type, Heap<Data>>().0.compare_exchange(
         std::ptr::null_mut(),
@@ -112,8 +108,11 @@ pub fn init<Type: 'static, Data: Copy + 'static>(data: Data) -> Result<(), Alrea
 
 /// Access the `Data`-storage of type `Type`.
 /// Each `Type` can hold data for multiple different instantiations of `Data`.
+///
+/// Only available on supported targets.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn get<Type: 'static, Data: Copy + 'static>() -> Option<Data> {
+    use std::sync::atomic::Ordering;
     let data = direct::<Type, Heap<Data>>().0.load(Ordering::SeqCst);
     if data.is_null() {
         None
@@ -124,8 +123,11 @@ pub fn get<Type: 'static, Data: Copy + 'static>() -> Option<Data> {
 
 /// Initialize & access the `Data`-storage of type `Type`.
 /// Each `Type` can hold data for multiple different instantiations of `Data`.
+///
+/// Only available on supported targets.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn get_or_init<Type: 'static, Data: Copy + 'static>(cons: impl Fn() -> Data) -> Data {
+    use std::sync::atomic::Ordering;
     let data = direct::<Type, Heap<Data>>().0.load(Ordering::SeqCst);
     if data.is_null() {
         let _ = init::<Type, _>(cons());
@@ -142,19 +144,17 @@ pub fn get_or_init<Type: 'static, Data: Copy + 'static>(cons: impl Fn() -> Data)
 /// If this is executed for the first time in multiple threads simultaneously,
 /// the initializing expression may get executed multiple times.
 ///
-/// Only available on supported targets; to support all platforms use [`fallback_generic_static`].
+/// On unsupported targets, this falls back to a hashmap and generic types
+/// from outer items may not be used.
+///
+/// On supported targets, the type annotation can be ommited.
+///
 /// # Example
 /// ```
-/// #![feature(const_collections_with_hasher)]
-/// # use std::sync::atomic::Ordering;
 /// # use std::sync::Mutex;
 /// # use generic_static_cache::generic_static;
 /// generic_static!{
-///     static NAME = &Mutex::new("Ferris".to_string());
-/// }
-/// // If the type cannot be infered, you can annotate it:
-/// generic_static!{
-///     static IDS: &Mutex<Vec<i32>> = &Mutex::new(Vec::new());
+///     static NAME: &Mutex<String> = &Mutex::new("Ferris".to_string());
 /// }
 /// ```
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -203,74 +203,70 @@ macro_rules! generic_static {
     };
 }
 
-/// Declare a static variable, keyed by a type.
-/// Its type must be a shared reference to a type that implements Sync.
+/// Declare a static variable that is not shared across different monomorphizations
+/// of the containing functions. Its type must be a shared reference to a type
+/// that implements Sync.
 ///
 /// If this is executed for the first time in multiple threads simultaneously,
 /// the initializing expression may get executed multiple times.
 ///
-/// Available on all targets (falls back to a fast HashMap on non-supported platforms).
+/// On unsupported targets, this falls back to a hashmap.
+///
+/// On supported targets, the type annotation can be ommited.
+///
 /// # Example
 /// ```
-/// #![feature(const_collections_with_hasher)]
-/// # use std::sync::atomic::Ordering;
 /// # use std::sync::Mutex;
-/// # use generic_static_cache::fallback_generic_static;
-/// # struct T;
-/// fallback_generic_static!(
-///     T => static NAME = &Mutex::new("Ferris".to_string());
-/// );
-/// // If the type cannot be infered, you can annotate it:
-/// fallback_generic_static!(
-///     T => static IDS: &Mutex<Vec<i32>> = &Mutex::new(Vec::new());
-/// );
+/// # use generic_static_cache::generic_static;
+/// generic_static!{
+///     static NAME: &Mutex<String> = &Mutex::new("Ferris".to_string());
+/// }
 /// ```
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[macro_export]
-macro_rules! fallback_generic_static {
-    {$key:ty => static $ident:ident $(: &$type:ty)? = &$init:expr;} => {
+macro_rules! generic_static {
+    {static $ident:ident: &$type:ty = &$init:expr;} => {
         #[allow(non_snake_case)]
-        let $ident $(: &'static $type)? = {
-            // Native
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
-                fn inner<Key: 'static, Value: Sync + 'static>(init: impl FnOnce() -> Value)
-                -> &'static Value {
-                    // If type is specified, it can be inferred because it's set for $ident
-                    $crate::generic_static! {
-                        static inner = &init();
+        let $ident: &'static $type = {
+            static MAP: std::sync::Mutex<$crate::TypeIdMap<&'static $type>> =
+                std::sync::Mutex::new($crate::TypeIdMap::with_hasher(
+                    $crate::NoOpTypeIdBuildHasher,
+                ));
+            MAP.lock()
+                .unwrap()
+                .entry({
+                    fn id<T: 'static>(_: T) -> std::any::TypeId {
+                        std::any::TypeId::of::<T>()
                     }
-                    inner
-                }
-                inner::<$key, _>(||$init)
-            }
-            // Fallback
-            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))] {
-                static MAP: std::sync::Mutex<$crate::TypeIdMap$(<&'static $type>)?> =
-                    std::sync::Mutex::new($crate::TypeIdMap::with_hasher(
-                        $crate::NoOpTypeIdBuildHasher,
-                    ));
-                MAP.lock()
-                    .unwrap()
-                    .entry(std::any::TypeId::of::<$key>())
-                    .or_insert_with(|| Box::leak(Box::new((|| $init)())))
-            }
+                    id(||())
+                })
+                .or_insert_with(|| Box::leak(Box::new((|| $init)())))
         };
     };
 }
 
 /// Access data associated with Type without indirection. Requires interior mutability to be useful.
 /// This data is independent of the data accessed via [`get`]/[`init`]/[`get_or_init`].
+///
+/// Only available on supported targets.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub fn direct<Type: 'static, Data: Zeroable + 'static>() -> &'static Data {
+pub fn direct<Type: 'static, Data: Zeroable + Sync + 'static>() -> &'static Data {
     // Work around "can't use generic parameter from outer function"
     trait Id: 'static {
         const ID: u128 = unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) };
     }
     impl<S: 'static> Id for S {}
 
+    use std::arch::asm;
+    use std::mem::{align_of, size_of};
     unsafe {
         // Create static storage
         asm!(
             ".pushsection .data",
+            // TODO: Check at what align the .data section gets loaded,
+            // ensure align is at most that large.
+            // I believe llvm uses 4kb by default (probably more if larger pages are enabled),
+            // but users could mess with the linker script, so add a note to the README?
             ".balign {align}",
             "type_data_{id}:",
             ".skip {size}",
@@ -330,7 +326,7 @@ impl Hasher for NoOpTypeIdHasher {
     }
 
     fn write(&mut self, _bytes: &[u8]) {
-        unreachable!()
+        unimplemented!()
     }
 
     fn write_u64(&mut self, i: u64) {
@@ -339,6 +335,7 @@ impl Hasher for NoOpTypeIdHasher {
 }
 
 #[cfg(test)]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn test_heapless() {
     use crate::direct;
@@ -357,11 +354,11 @@ fn test_heapless() {
 
 #[cfg(test)]
 #[test]
-fn test_fallback_macro() {
+fn test_macro() {
     use std::sync::atomic::{AtomicI32, Ordering};
     fn get_and_inc<T: 'static>() -> i32 {
-        fallback_generic_static!(
-            T => static BLUB = &AtomicI32::new(1);
+        generic_static!(
+            static BLUB: &AtomicI32 = &AtomicI32::new(1);
         );
         let value = BLUB.load(Ordering::Relaxed);
         BLUB.fetch_add(1, Ordering::Relaxed);
@@ -372,11 +369,11 @@ fn test_fallback_macro() {
     assert_eq!(get_and_inc::<String>(), 1);
     assert_eq!(get_and_inc::<bool>(), 3);
 
-    fallback_generic_static!(
-        () => static FOO_1 = &AtomicI32::new(0);
+    generic_static!(
+        static FOO_1: &AtomicI32 = &AtomicI32::new(0);
     );
-    fallback_generic_static!(
-        () => static FOO_2: &AtomicI32 = &AtomicI32::new(69);
+    generic_static!(
+        static FOO_2: &AtomicI32 = &AtomicI32::new(69);
     );
     assert_eq!(FOO_1.load(Ordering::Relaxed), 0);
     assert_eq!(FOO_2.load(Ordering::Relaxed), 69);
@@ -384,4 +381,13 @@ fn test_fallback_macro() {
     FOO_2.store(2, Ordering::Relaxed);
     assert_eq!(FOO_1.load(Ordering::Relaxed), 1);
     assert_eq!(FOO_2.load(Ordering::Relaxed), 2);
+}
+
+#[cfg(test)]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn test_macro_type_inference() {
+    generic_static! {
+        static _FOO = &();
+    }
 }
