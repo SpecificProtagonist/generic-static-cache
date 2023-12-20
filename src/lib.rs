@@ -31,9 +31,9 @@
 //! # use generic_static_cache::generic_static;
 //! fn get_and_inc<T>() -> i32 {
 //!     generic_static!{
-//!         static blub: &AtomicI32 = &AtomicI32::new(1);
+//!         static COUNTER = &AtomicI32::new(1);
 //!     }
-//!     blub.fetch_add(1, Ordering::Relaxed)
+//!     COUNTER.fetch_add(1, Ordering::Relaxed)
 //! }
 //! assert_eq!(get_and_inc::<bool>(), 1);
 //! assert_eq!(get_and_inc::<bool>(), 2);
@@ -47,7 +47,7 @@
 //! ...
 //! # */ struct T;
 //! fallback_generic_static!{
-//!     T => static blub: &AtomicI32 = &AtomicI32::new(1);
+//!     T => static COUNTER = &AtomicI32::new(1);
 //! }
 //! # /*
 //! ...
@@ -139,6 +139,9 @@ pub fn get_or_init<Type: 'static, Data: Copy + 'static>(cons: impl Fn() -> Data)
 /// of the containing functions. Its type must be a shared reference to a type
 /// that implements Sync.
 ///
+/// If this is executed for the first time in multiple threads simultaneously,
+/// the initializing expression may get executed multiple times.
+///
 /// Only available on supported targets; to support all platforms use [`fallback_generic_static`].
 /// # Example
 /// ```
@@ -147,27 +150,37 @@ pub fn get_or_init<Type: 'static, Data: Copy + 'static>(cons: impl Fn() -> Data)
 /// # use std::sync::Mutex;
 /// # use generic_static_cache::generic_static;
 /// generic_static!{
-///     static name: &Mutex<String> = &Mutex::new("Ferris".to_string());
+///     static NAME = &Mutex::new("Ferris".to_string());
+/// }
+/// // If the type cannot be infered, you can annotate it:
+/// generic_static!{
+///     static IDS: &Mutex<Vec<i32>> = &Mutex::new(Vec::new());
 /// }
 /// ```
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[macro_export]
 macro_rules! generic_static {
-    {static $ident:ident : &$type:ty = &$init:expr;} => {
-        let $ident: &'static $type = {
-            fn assert_sync<T: Sync>() {}
-            assert_sync::<$type>();
-            trait Make<T>: Sized + 'static {
-                fn make(self) -> &'static std::sync::atomic::AtomicPtr<T> {
-                    $crate::direct::<Self, std::sync::atomic::AtomicPtr<T>>()
-                }
+    {static $ident:ident $(: &$type:ty)? = &$init:expr;} => {
+        #[allow(non_snake_case)]
+        let $ident $(: &'static $type)? = {
+            let init = ||$init;
+            fn assert_sync<T: Sync>(_: &impl FnOnce() -> T) {}
+            assert_sync(&init);
+
+            // Use use empty closure to create a new type to use as a unique key,
+            // use reference to initializer to infer type of static data
+            fn make<Key: 'static, Value>(_: Key, _: &impl FnOnce()->Value)
+            -> &'static std::sync::atomic::AtomicPtr<Value> {
+                $crate::direct::<Key, std::sync::atomic::AtomicPtr<Value>>()
             }
-            impl<T: 'static, S> Make<S> for T {}
-            let ptr = Make::<$type>::make(|| ());
+            let ptr = make(||(), &init);
+
             let data = ptr.load(std::sync::atomic::Ordering::SeqCst);
             if data.is_null() {
-                let value: $type = (|| $init)();
-                let boxed = Box::into_raw(Box::new(value));
+                // Need to call initializer
+                // This can be called multiple times if executed for the first time
+                // in multiple threads simultaneously!
+                let boxed = Box::into_raw(Box::new(init()));
                 if ptr
                     .compare_exchange(
                         std::ptr::null_mut(),
@@ -177,6 +190,7 @@ macro_rules! generic_static {
                     )
                     .is_err()
                 {
+                    // Was simultaneously initialized by another thread
                     unsafe {
                         drop(Box::from_raw(boxed));
                     }
@@ -192,6 +206,9 @@ macro_rules! generic_static {
 /// Declare a static variable, keyed by a type.
 /// Its type must be a shared reference to a type that implements Sync.
 ///
+/// If this is executed for the first time in multiple threads simultaneously,
+/// the initializing expression may get executed multiple times.
+///
 /// Available on all targets (falls back to a fast HashMap on non-supported platforms).
 /// # Example
 /// ```
@@ -201,25 +218,34 @@ macro_rules! generic_static {
 /// # use generic_static_cache::fallback_generic_static;
 /// # struct T;
 /// fallback_generic_static!(
-///     T => static name: &Mutex<String> = &Mutex::new("Ferris".to_string());
+///     T => static NAME = &Mutex::new("Ferris".to_string());
+/// );
+/// // If the type cannot be infered, you can annotate it:
+/// fallback_generic_static!(
+///     T => static IDS: &Mutex<Vec<i32>> = &Mutex::new(Vec::new());
 /// );
 /// ```
 #[macro_export]
 macro_rules! fallback_generic_static {
-    {$key:ty => static $ident:ident : &$type:ty = &$init:expr;} => {
-        let $ident: &'static $type = {
+    {$key:ty => static $ident:ident $(: &$type:ty)? = &$init:expr;} => {
+        #[allow(non_snake_case)]
+        let $ident $(: &'static $type)? = {
+            // Native
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
-                fn inner<T: 'static>(init: impl FnOnce() -> $type) -> &'static $type {
+                fn inner<Key: 'static, Value: Sync + 'static>(init: impl FnOnce() -> Value)
+                -> &'static Value {
+                    // If type is specified, it can be inferred because it's set for $ident
                     $crate::generic_static! {
-                        static inner: &$type = &init();
+                        static inner = &init();
                     }
                     inner
                 }
-                inner::<$key>(||$init)
+                inner::<$key, _>(||$init)
             }
+            // Fallback
             #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))] {
-                static MAP: std::sync::Mutex<$crate::TypeIdMap<&'static $type>> =
-                    std::sync::Mutex::new($crate::TypeIdMap::<&'static $type>::with_hasher(
+                static MAP: std::sync::Mutex<$crate::TypeIdMap$(<&'static $type>)?> =
+                    std::sync::Mutex::new($crate::TypeIdMap::with_hasher(
                         $crate::NoOpTypeIdBuildHasher,
                     ));
                 MAP.lock()
@@ -335,10 +361,10 @@ fn test_fallback_macro() {
     use std::sync::atomic::{AtomicI32, Ordering};
     fn get_and_inc<T: 'static>() -> i32 {
         fallback_generic_static!(
-            T => static blub: &AtomicI32 = &AtomicI32::new(1);
+            T => static BLUB = &AtomicI32::new(1);
         );
-        let value = blub.load(Ordering::Relaxed);
-        blub.fetch_add(1, Ordering::Relaxed);
+        let value = BLUB.load(Ordering::Relaxed);
+        BLUB.fetch_add(1, Ordering::Relaxed);
         value
     }
     assert_eq!(get_and_inc::<bool>(), 1);
@@ -347,15 +373,15 @@ fn test_fallback_macro() {
     assert_eq!(get_and_inc::<bool>(), 3);
 
     fallback_generic_static!(
-        () => static foo_1: &AtomicI32 = &AtomicI32::new(0);
+        () => static FOO_1 = &AtomicI32::new(0);
     );
     fallback_generic_static!(
-        () => static foo_2: &AtomicI32 = &AtomicI32::new(69);
+        () => static FOO_2: &AtomicI32 = &AtomicI32::new(69);
     );
-    assert_eq!(foo_1.load(Ordering::Relaxed), 0);
-    assert_eq!(foo_2.load(Ordering::Relaxed), 69);
-    foo_1.store(1, Ordering::Relaxed);
-    foo_2.store(2, Ordering::Relaxed);
-    assert_eq!(foo_1.load(Ordering::Relaxed), 1);
-    assert_eq!(foo_2.load(Ordering::Relaxed), 2);
+    assert_eq!(FOO_1.load(Ordering::Relaxed), 0);
+    assert_eq!(FOO_2.load(Ordering::Relaxed), 69);
+    FOO_1.store(1, Ordering::Relaxed);
+    FOO_2.store(2, Ordering::Relaxed);
+    assert_eq!(FOO_1.load(Ordering::Relaxed), 1);
+    assert_eq!(FOO_2.load(Ordering::Relaxed), 2);
 }

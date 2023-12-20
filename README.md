@@ -24,9 +24,9 @@ Static variables in a generic context:
 #![feature(const_collections_with_hasher)]
 fn get_and_inc<T>() -> i32 {
     generic_static!{
-        static blub: &AtomicI32 = &AtomicI32::new(1);
+        static BLUB = &AtomicI32::new(1);
     }
-    blub.fetch_add(1, Ordering::Relaxed)
+    BLUB.fetch_add(1, Ordering::Relaxed)
 }
 assert_eq!(get_and_inc::<bool>(), 1);
 assert_eq!(get_and_inc::<bool>(), 2);
@@ -37,7 +37,7 @@ To support all platforms (keeping the performance benefits on supported platform
 ```rust
 ...
 fallback_generic_static!{
-    T => static blub: &AtomicI32 = &AtomicI32::new(1);
+    T => static BLUB = &AtomicI32::new(1);
 }
 ...
 ```
