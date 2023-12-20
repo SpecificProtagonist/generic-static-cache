@@ -24,22 +24,20 @@ Static variables in a generic context:
 #![feature(const_collections_with_hasher)]
 fn get_and_inc<T>() -> i32 {
     generic_static!{
-        static blub: &AtomicI32 = &AtomicI32::new(0);
+        static blub: &AtomicI32 = &AtomicI32::new(1);
     }
-    let value = blub.load(Ordering::Relaxed);
-    blub.fetch_add(1, Ordering::Relaxed);
-    value
+    blub.fetch_add(1, Ordering::Relaxed)
 }
-assert_eq!(get_and_inc::<bool>(), 0);
 assert_eq!(get_and_inc::<bool>(), 1);
-assert_eq!(get_and_inc::<String>(), 0);
 assert_eq!(get_and_inc::<bool>(), 2);
+assert_eq!(get_and_inc::<String>(), 1);
+assert_eq!(get_and_inc::<bool>(), 3);
 ```
 To support all platforms (keeping the performance benefits on supported platforms), change the above to
 ```rust
 ...
 fallback_generic_static!{
-    T => static blub: &AtomicI32 = &AtomicI32::new(0);
+    T => static blub: &AtomicI32 = &AtomicI32::new(1);
 }
 ...
 ```

@@ -33,9 +33,7 @@
 //!     generic_static!{
 //!         static blub: &AtomicI32 = &AtomicI32::new(1);
 //!     }
-//!     let value = blub.load(Ordering::Relaxed);
-//!     blub.fetch_add(1, Ordering::Relaxed);
-//!     value
+//!     blub.fetch_add(1, Ordering::Relaxed)
 //! }
 //! assert_eq!(get_and_inc::<bool>(), 1);
 //! assert_eq!(get_and_inc::<bool>(), 2);
