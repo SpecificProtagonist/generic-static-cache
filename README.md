@@ -1,6 +1,6 @@
 ⚠ Nightly ⚠
 
-## This crate is still being tested and probably not a good idea anyhow!
+## This crate is still very experimental and probably not a good idea anyhow!
 
 Quoting the [Rust Reference](https://doc.rust-lang.org/reference/items/static-items.html):
 
@@ -21,7 +21,7 @@ falls back to a hashmap and most other functionality is unavailable.
 
 Additionally, different compilation units may access different instances of the data!
 
-This crate requires the following unstable features: `asm_const`, `const_type_id` and
+This crate requires the following unstable features: `asm_const` and
 (on unsupported targets) `const_collections_with_hasher`.
 
 # Examples

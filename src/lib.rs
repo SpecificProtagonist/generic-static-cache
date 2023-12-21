@@ -1,10 +1,8 @@
 #![feature(asm_const)]
-#![feature(const_type_id)]
 #![cfg_attr(
     not(any(target_arch = "x86_64", target_arch = "aarch64")),
     feature(const_collections_with_hasher)
 )]
-#![allow(named_asm_labels)]
 // TODO: Properly test data for same type from different compilation units
 // TODO: More platforms
 // TODO: Benches
@@ -28,7 +26,7 @@
 //!
 //! Additionally, different compilation units may access different instances of the data!
 //!
-//! This crate requires the following unstable features: `asm_const`, `const_type_id` and
+//! This crate requires the following unstable features: `asm_const` and
 //! (on unsupported targets) `const_collections_with_hasher`.
 //!
 //! # Examples
@@ -245,23 +243,27 @@ macro_rules! generic_static {
     };
 }
 
-/// Access data associated with Type without indirection. Requires interior mutability to be useful.
-/// This data is independent of the data accessed via [`get`]/[`init`]/[`get_or_init`].
-///
-/// Only available on supported targets.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub fn direct<Type: 'static, Data: Zeroable + Sync + 'static>() -> &'static Data {
-    // Work around "can't use generic parameter from outer function"
-    trait Id: 'static {
-        const ID: u128 = unsafe { std::mem::transmute(std::any::TypeId::of::<Self>()) };
-    }
-    impl<S: 'static> Id for S {}
+trait Carrier: 'static {
+    unsafe fn storage(&self) -> TypeId;
+}
 
-    use std::arch::asm;
-    use std::mem::{align_of, size_of};
-    unsafe {
-        // Create static storage
-        asm!(
+impl<T: 'static, D: Zeroable + Sync + 'static> Carrier for (T, D) {
+    /// THIS PLACE IS NOT A PLACE OF HONOR.  
+    /// NO HIGHLY ESTEEMED DEED IS COMMEMORATED HERE.  
+    /// NOTHING VALUED IS HERE.  
+    /// WHAT IS HERE WAS DANGEROUS AND REPULSIVE TO US.  
+    /// THE DANGER IS IN A PARTICULAR LOCATION.  
+    /// THE DANGER IS STILL PRESENT, IN YOUR TIME, AS IT WAS IN OURS.  
+    ///
+    /// The useage of sym seems to prevent rustc from optimizing this out
+    /// in release mode, even though it's never called.
+    /// The inline is does the same, but for debug mode.
+    ///
+    /// Why? *shrug* Only 𒀭𒂗𒆠, the god of knowledge, knows
+    /// and even he needs a minute to figure this out.
+    #[inline(always)]
+    unsafe fn storage(&self) -> TypeId {
+        std::arch::asm!(
             ".pushsection .data",
             // TODO: Check at what align the .data section gets loaded,
             // ensure align is at most that large.
@@ -271,29 +273,40 @@ pub fn direct<Type: 'static, Data: Zeroable + Sync + 'static>() -> &'static Data
             "type_data_{id}:",
             ".skip {size}",
             ".popsection",
-            id = const <(Type, Data) as Id>::ID,
-            align = const align_of::<Data>(),
-            size = const size_of::<Data>(),
+            id = sym <(T, D) as Carrier>::storage,
+            align = const std::mem::align_of::<D>(),
+            size = const std::mem::size_of::<D>(),
             options(nomem)
         );
+        TypeId::of::<(T, D)>()
+    }
+}
+
+/// Access data associated with Type without indirection. Requires interior mutability to be useful.
+/// This data is independent of the data accessed via [`get`]/[`init`]/[`get_or_init`].
+///
+/// Only available on supported targets.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn direct<Type: 'static, Data: Zeroable + Sync + 'static>() -> &'static Data {
+    unsafe {
         // Tested both with position-independent code and with -C relocation-model=static
         let addr: usize;
         #[cfg(target_arch = "x86_64")]
         {
-            asm!(
+            std::arch::asm!(
                 "lea {addr}, [rip+type_data_{id}]",
                 addr = out(reg) addr,
-                id = const <(Type, Data) as Id>::ID,
+                id = sym <(Type, Data) as Carrier>::storage,
                 options(pure, nomem)
             );
         }
         #[cfg(target_arch = "aarch64")]
         {
-            asm!(
+            atd::arch::asm!(
                 "adrp {addr}, type_data_{id}",
                 "add {addr}, {addr}, :lo12:type_data_{id}",
                 addr = out(reg) addr,
-                id = const <(Type, Data) as Id>::ID,
+                id = sym <(Type, Data) as Carrier>::storage,
                 options(pure, nomem)
             );
         }
