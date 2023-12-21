@@ -3,6 +3,7 @@
     not(any(target_arch = "x86_64", target_arch = "aarch64")),
     feature(const_collections_with_hasher)
 )]
+#![allow(named_asm_labels)]
 // TODO: Properly test data for same type from different compilation units
 // TODO: More platforms
 // TODO: Benches
